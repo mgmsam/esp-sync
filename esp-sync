@@ -22,21 +22,29 @@ PKG="/etc/initramfs/post-update.d/${0##*/}"
 
 if test -t 1 && test -t 2
 then
-   CL_PKG='\033[36m'
-   CL_ERR='\033[31m'
-   CL_MSG='\033[32m'
-   CL_NOTE='\033[33m'
-   BOLD='\033[1m'
-   RESET='\033[0m'
+    CL_PKG='\033[36m'
+    CL_ERR='\033[31m'
+    CL_MSG='\033[32m'
+    CL_NOTE='\033[33m'
+    BOLD='\033[1m'
+    RESET='\033[0m'
 fi
 
 say ()
 {
     case "$1" in
-        ERROR) echo "${BOLD:-}${CL_PKG:-}$PKG: ${CL_ERR:-}ERROR: $2${RESET:-}${3:+ $3}" >&2 ;;
-         NOTE) echo "${BOLD:-}${CL_PKG:-}$PKG: ${CL_NOTE:-}NOTE: $2${RESET:-}${3:+ $3}"     ;;
-        USAGE) echo "${BOLD:-}${CL_ERR:-}Usage:${RESET:-} $PKG $2${RESET:-}${3:+ $3}"   >&2 ;;
-            *) echo "${BOLD:-}${CL_PKG:-}$PKG: ${CL_MSG:-}$1${RESET:-}${2:+ $2}"
+        ERROR)
+            echo "${BOLD:-}${CL_PKG:-}$PKG: ${CL_ERR:-}ERROR: $2${RESET:-}${3:+ $3}" >&2
+        ;;
+        NOTE)
+            echo "${BOLD:-}${CL_PKG:-}$PKG: ${CL_NOTE:-}NOTE: $2${RESET:-}${3:+ $3}"    
+        ;;
+        USAGE)
+            echo "${BOLD:-}${CL_ERR:-}Usage:${RESET:-} $PKG $2${RESET:-}${3:+ $3}" >&2
+        ;;
+        *)
+            echo "${BOLD:-}${CL_PKG:-}$PKG: ${CL_MSG:-}$1${RESET:-}${2:+ $2}"     
+        ;;
     esac
 }
 
@@ -59,20 +67,23 @@ fi
 : "${ESP_MOUNTPOINT:="/boot/efi"}"
 
 case "${ESP_SYNC_UUIDS:-}" in
-    *[![:blank:]]*)
+    "")
+        say NOTE "ESP_SYNC_UUIDS variable is empty in the configuration file:" "$ESP_SYNC_CONFIG"
+        false
+    ;;
+    *[![:space:]0-9a-fA-F:,-]*)
+        say ERROR "Incorrect variable value:" "ESP_SYNC_UUIDS=\"$ESP_SYNC_UUIDS\""
+        false
+    ;;
+    *[0-9a-fA-F]*)
         say NOTE "Starting sync for UUIDs:" "$ESP_SYNC_UUIDS"
-        ;;
-    "") say NOTE "ESP_SYNC_UUIDS variable is empty in the configuration file:" "$ESP_SYNC_CONFIG"
-        false
-        ;;
-    *)  say ERROR "Incorrect variable value:" "ESP_SYNC_UUIDS=\"$ESP_SYNC_UUIDS\""
-        false
+    ;;
 esac || {
-   say NOTE "Set valid ESP UUIDs in the ESP_SYNC_UUIDS variable in the configuration file:" "$ESP_SYNC_CONFIG"
-   say NOTE "To get disk UUIDs, run the command:" "blkid"
-   say NOTE "Nothing to sync."
-   say NOTE "If this is not the case, sync '$ESP_MOUNTPOINT' to other ESPs manually."
-   exit
+    say NOTE "Set valid ESP UUIDs in the ESP_SYNC_UUIDS variable in the configuration file:" "$ESP_SYNC_CONFIG"
+    say NOTE "To get disk UUIDs, run the command:" "blkid"
+    say NOTE "Nothing to sync."
+    say NOTE "If this is not the case, sync '$ESP_MOUNTPOINT' to other ESPs manually."
+    exit
 }
 
 say "Creating temporary directory to mount other ESPs..."
@@ -84,10 +95,19 @@ say "Temporary directory created:" "'$ESP_TMP_MOUNTPOINT'"
 
 ESP_SOURCE="$(df --output=source,target | grep " $ESP_MOUNTPOINT$")" || {
     mount --verbose "$ESP_MOUNTPOINT" &&
-    ESP_SOURCE="$(df --output=source,target | grep " $ESP_MOUNTPOINT$")"
+    ESP_SOURCE="$(df --output=source,target | grep " $ESP_MOUNTPOINT$")" || {
+        say ERROR "Failed to mount '$ESP_MOUNTPOINT'."
+        say NOTE "Nothing to sync."
+        say NOTE "Sync '$ESP_MOUNTPOINT' to other ESPs manually."
+        exit 1
+    }
 } && ESP_SOURCE="${ESP_SOURCE%%[[:blank:]]*}"
 
-for UUID in $ESP_SYNC_UUIDS
+IFS="$IFS,"
+set -- $ESP_SYNC_UUIDS
+IFS="${IFS%,}"
+
+for UUID
 do
     # Some people have cloned ESP, which means they have the same UUID.
     ESP="$(
@@ -102,27 +122,28 @@ do
         continue
     }
 
-    echo "$ESP" | while read ESP MOUNTPOINT
+    while read -r ESP MOUNTPOINT
     do
         test "$ESP_SOURCE" != "$ESP" || continue
         say "Syncing '$ESP_SOURCE' ($ESP_MOUNTPOINT) and '$ESP'..."
         test "${MOUNTPOINT:-}" &&
-        say NOTE "Skipped because '$ESP' mounted to '$MOUNTPOINT'" || {
-            if mount --verbose "$ESP" "$ESP_TMP_MOUNTPOINT"
-            then
-                rsync  --verbose --archive --delete "$ESP_MOUNTPOINT/" "$ESP_TMP_MOUNTPOINT" || :
-                umount --verbose "$ESP" || {
-                    say ERROR "Failed to unmount '$ESP' from '$ESP_TMP_MOUNTPOINT/'"
-                    say ERROR "Cannot continue with ESP syncing"
-                    exit 2
-                }
-            else
-                say ERROR "Failed to mount '$ESP' to '$ESP_TMP_MOUNTPOINT'."
-            fi
-        }
-    done
+        say NOTE "Skipped because '$ESP' mounted to '$MOUNTPOINT'" ||
+        if mount --verbose "$ESP" "$ESP_TMP_MOUNTPOINT"
+        then
+            rsync  --verbose --archive --delete "$ESP_MOUNTPOINT/" "$ESP_TMP_MOUNTPOINT" || :
+            umount --verbose "$ESP" || {
+                say ERROR "Failed to unmount '$ESP' from '$ESP_TMP_MOUNTPOINT/'"
+                say ERROR "Cannot continue with ESP syncing"
+                exit 2
+            }
+        else
+            say ERROR "Failed to mount '$ESP' to '$ESP_TMP_MOUNTPOINT'."
+        fi
+    done <<EOF
+$ESP
+EOF
 done
 say "ESP syncing completed."
 
 say "Removing temporary directory:" "'$ESP_TMP_MOUNTPOINT'"
-rm  --verbose --recursive --force "$ESP_TMP_MOUNTPOINT" && say "Done." || say ERROR "Done."
+rm --verbose --recursive --force "$ESP_TMP_MOUNTPOINT" && say "Done." || say ERROR "Done."
